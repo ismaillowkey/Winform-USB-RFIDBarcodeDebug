@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Windows.Forms;
+using System.IO;
 using Microsoft.Win32;
 
 namespace WinformUSBRFID
@@ -249,16 +250,64 @@ namespace WinformUSBRFID
             // Pemilihan item ComboBox
             if (comboBoxDevices.Items.Count > 0)
             {
-                // Jika ada perangkat yang baru terhubung, otomatis pilih perangkat tersebut
+                int targetIndex = -1;
+
+                // 1. Cek apakah ada perangkat yang baru saja terhubung setelah refresh
                 if (newlyConnectedItem != null)
                 {
-                    comboBoxDevices.SelectedItem = newlyConnectedItem;
-                }
-                else
-                {
-                    comboBoxDevices.SelectedIndex = 0;
+                    targetIndex = comboBoxDevices.Items.IndexOf(newlyConnectedItem);
                 }
 
+                // 2. Jika tidak ada perangkat baru, coba cari berdasarkan ID terakhir di laststate.conf
+                if (targetIndex < 0)
+                {
+                    string lastSavedId = LoadLastConnectedDeviceId();
+                    if (!string.IsNullOrEmpty(lastSavedId))
+                    {
+                        // Cari item yang DevicePath-nya cocok persis
+                        for (int i = 0; i < comboBoxDevices.Items.Count; i++)
+                        {
+                            UsbHidDeviceItem item = comboBoxDevices.Items[i] as UsbHidDeviceItem;
+                            if (item != null)
+                            {
+                                if (string.Equals(item.DevicePath, lastSavedId, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    targetIndex = i;
+                                    break;
+                                }
+                            }
+                        }
+
+                        // Jika path lengkap tidak cocok (misal berpindah port USB), coba cocokkan berdasarkan VID/PID
+                        if (targetIndex < 0)
+                        {
+                            string savedVidPid = ExtractVidPid(lastSavedId);
+                            if (!string.IsNullOrEmpty(savedVidPid))
+                            {
+                                for (int i = 0; i < comboBoxDevices.Items.Count; i++)
+                                {
+                                    UsbHidDeviceItem item = comboBoxDevices.Items[i] as UsbHidDeviceItem;
+                                    if (item != null && !string.IsNullOrEmpty(item.VidPid))
+                                    {
+                                        if (string.Equals(item.VidPid, savedVidPid, StringComparison.OrdinalIgnoreCase))
+                                        {
+                                            targetIndex = i;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 3. Jika tetap belum ditemukan, gunakan indeks pertama (0) sebagai default
+                if (targetIndex < 0)
+                {
+                    targetIndex = 0;
+                }
+
+                comboBoxDevices.SelectedIndex = targetIndex;
                 btnConnect.Enabled = true;
             }
             else
@@ -438,6 +487,133 @@ namespace WinformUSBRFID
 
         #endregion
 
+        #region Last State Management
+
+        private const string LAST_STATE_FILE_NAME = "laststate.conf";
+
+        /// <summary>
+        /// Menyimpan ID perangkat yang terakhir kali terhubung ke dalam file konfigurasi laststate.conf.
+        /// </summary>
+        /// <param name="deviceId">Device path atau identifier perangkat USB HID.</param>
+        private void SaveLastConnectedDevice(string deviceId)
+        {
+            if (string.IsNullOrEmpty(deviceId))
+            {
+                return;
+            }
+
+            try
+            {
+                // Simpan pada direktori eksekusi aplikasi (BaseDirectory)
+                string appBasePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, LAST_STATE_FILE_NAME);
+                File.WriteAllText(appBasePath, deviceId);
+
+                // Jika direktori kerja saat ini berbeda (misalnya saat dijalankan dengan dotnet run dari root project),
+                // simpan juga salinan di direktori kerja agar konsisten dan mudah diakses
+                string currentDir = Directory.GetCurrentDirectory();
+                if (!string.Equals(currentDir, AppDomain.CurrentDomain.BaseDirectory, StringComparison.OrdinalIgnoreCase))
+                {
+                    string localPath = Path.Combine(currentDir, LAST_STATE_FILE_NAME);
+                    File.WriteAllText(localPath, deviceId);
+                }
+            }
+            catch
+            {
+                // Abaikan kesalahan penulisan file jika ada kendala hak akses sistem
+            }
+        }
+
+        /// <summary>
+        /// Membaca ID perangkat terakhir yang tersimpan pada file laststate.conf.
+        /// </summary>
+        /// <returns>String ID perangkat jika ditemukan, atau null jika file tidak ada.</returns>
+        private string LoadLastConnectedDeviceId()
+        {
+            try
+            {
+                // 1. Periksa file laststate.conf di direktori kerja saat ini
+                string currentDir = Directory.GetCurrentDirectory();
+                string localPath = Path.Combine(currentDir, LAST_STATE_FILE_NAME);
+                if (File.Exists(localPath))
+                {
+                    string deviceId = ReadDeviceIdFromFile(localPath);
+                    if (!string.IsNullOrEmpty(deviceId))
+                    {
+                        return deviceId;
+                    }
+                }
+
+                // 2. Periksa file laststate.conf di BaseDirectory aplikasi
+                string appBasePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, LAST_STATE_FILE_NAME);
+                if (File.Exists(appBasePath))
+                {
+                    string deviceId = ReadDeviceIdFromFile(appBasePath);
+                    if (!string.IsNullOrEmpty(deviceId))
+                    {
+                        return deviceId;
+                    }
+                }
+            }
+            catch
+            {
+                // Abaikan kesalahan pembacaan konfigurasi
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Membaca dan mengekstrak ID perangkat dari baris file laststate.conf.
+        /// </summary>
+        private string ReadDeviceIdFromFile(string filePath)
+        {
+            try
+            {
+                string[] lines = File.ReadAllLines(filePath);
+                for (int i = 0; i < lines.Length; i++)
+                {
+                    string line = lines[i].Trim();
+                    if (string.IsNullOrEmpty(line))
+                    {
+                        continue;
+                    }
+
+                    // Lewati baris komentar jika ada
+                    if (line.StartsWith("#") || line.StartsWith(";") || line.StartsWith("//"))
+                    {
+                        continue;
+                    }
+
+                    // Dukung format key-value jika ada prefix DeviceId=, DevicePath=, atau Id=
+                    if (line.StartsWith("DeviceId=", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return line.Substring("DeviceId=".Length).Trim();
+                    }
+
+                    if (line.StartsWith("DevicePath=", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return line.Substring("DevicePath=".Length).Trim();
+                    }
+
+                    if (line.StartsWith("Id=", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return line.Substring("Id=".Length).Trim();
+                    }
+
+                    // Format plain text langsung
+                    return line;
+                }
+            }
+            catch
+            {
+                // Abaikan kesalahan pembacaan
+            }
+
+            return null;
+        }
+
+        #endregion
+
         #region Event Handlers
 
         private void btnRefresh_Click(object sender, EventArgs e)
@@ -489,6 +665,9 @@ namespace WinformUSBRFID
             }
 
             _isConnected = true;
+
+            // Simpan ID perangkat yang terhubung ke dalam file laststate.conf
+            SaveLastConnectedDevice(_connectedDevice.DevicePath);
 
             // Berikan status koneksi pada RichTextBox
             if (_currentLanguage == "ID")

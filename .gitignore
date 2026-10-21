@@ -38,3 +38,6 @@ $RECYCLE.BIN/
 ## Rider / JetBrains
 .idea/
 *.sln.iml
+
+## Application runtime configuration & state
+laststate.conf
